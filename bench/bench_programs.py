@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import gc
 import sys
 import time
@@ -109,11 +107,19 @@ def make_lines(count, as_bytes):
     return [make_line(index, as_bytes) for index in range(count)]
 
 
-def run_program(case_name, lines, capacity):
+def iter_lines(count, as_bytes):
+    for index in range(count):
+        yield make_line(index, as_bytes)
+
+
+def make_processor(case_name, capacity):
     if case_name == "telemetry_naive":
-        processor = telemetry_naive.TelemetryProcessor()
-    else:
-        processor = telemetry_optimized.TelemetryProcessor(capacity)
+        return telemetry_naive.TelemetryProcessor()
+    return telemetry_optimized.TelemetryProcessor(capacity)
+
+
+def run_program(case_name, lines, capacity):
+    processor = make_processor(case_name, capacity)
     for line in lines:
         processor.process_line(line)
     return processor.summary()
@@ -124,7 +130,11 @@ def measure_micropython(case_name, lines, capacity):
     free_before = gc.mem_free() if hasattr(gc, "mem_free") else None
     alloc_before = gc.mem_alloc() if hasattr(gc, "mem_alloc") else None
     start = clock_us()
-    summary = run_program(case_name, lines, capacity)
+    processor = make_processor(case_name, capacity)
+    for line in lines:
+        processor.process_line(line)
+    line = None
+    summary = processor.summary()
     end = clock_us()
     gc.collect()
     free_after = gc.mem_free() if hasattr(gc, "mem_free") else None
@@ -134,6 +144,8 @@ def measure_micropython(case_name, lines, capacity):
         delta = free_before - free_after
     elif alloc_before is not None and alloc_after is not None:
         delta = alloc_after - alloc_before
+    processor = None
+    gc.collect()
     return summary, delta, free_before, free_after, elapsed_us(start, end), None
 
 
@@ -146,21 +158,30 @@ def measure_cpython(case_name, lines, capacity):
     gc.collect()
     if tracemalloc is None:
         start = clock_us()
-        summary = run_program(case_name, lines, capacity)
+        processor = make_processor(case_name, capacity)
+        for line in lines:
+            processor.process_line(line)
+        line = None
+        summary = processor.summary()
         end = clock_us()
+        processor = None
         return summary, None, None, None, elapsed_us(start, end), None
 
     tracemalloc.start()
     start = clock_us()
-    summary = run_program(case_name, lines, capacity)
+    processor = make_processor(case_name, capacity)
+    for line in lines:
+        processor.process_line(line)
+    line = None
+    summary = processor.summary()
     end = clock_us()
     current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
+    processor = None
     return summary, current, None, None, elapsed_us(start, end), peak
 
 
 def measure_case(case_name, count, options):
-    lines = make_lines(count, case_name == "telemetry_optimized")
     row = {
         "impl": getattr(sys.implementation, "name", "python"),
         "target": options["target"],
@@ -176,6 +197,7 @@ def measure_case(case_name, count, options):
         "status": "ok",
     }
     try:
+        lines = iter_lines(count, case_name == "telemetry_optimized")
         if is_micropython():
             summary, delta, free_before, free_after, time_us, peak = measure_micropython(
                 case_name, lines, options["capacity"]
@@ -196,27 +218,42 @@ def measure_case(case_name, count, options):
     except Exception as exc:
         row["status"] = "error"
         row["error"] = str(exc)
-    lines = None
     gc.collect()
     return row
 
 
-def write_json(rows, path):
+def write_json_rows(rows, path):
+    close_handle = False
     if path:
-        with open(path, "w") as handle:
-            json.dump(rows, handle)
-            handle.write("\n")
+        handle = open(path, "w")
+        close_handle = True
     else:
-        print(json.dumps(rows))
+        handle = sys.stdout
+
+    try:
+        handle.write("[")
+        first = True
+        for row in rows:
+            if first:
+                first = False
+            else:
+                handle.write(",")
+            json.dump(row, handle)
+        handle.write("]\n")
+    finally:
+        if close_handle:
+            handle.close()
 
 
 def main(argv):
     options = parse_args(argv)
-    rows = []
-    for count in options["counts"]:
-        rows.append(measure_case("telemetry_naive", count, options))
-        rows.append(measure_case("telemetry_optimized", count, options))
-    write_json(rows, options["out"])
+
+    def rows():
+        for count in options["counts"]:
+            yield measure_case("telemetry_naive", count, options)
+            yield measure_case("telemetry_optimized", count, options)
+
+    write_json_rows(rows(), options["out"])
 
 
 if __name__ == "__main__":

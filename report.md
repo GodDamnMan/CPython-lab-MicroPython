@@ -8,9 +8,10 @@
 
 - CPython 3.12.3 на ПК.
 - MicroPython Unix port с ограничением heap через `-X heapsize`.
-- MicroPython на ESP32 через `mpremote`.
+- MicroPython на ESP8266EX 4MB через `mpremote`.
 
-В текущем окружении был доступен CPython 3.12.3. Команды `micropython` и `mpremote` в `PATH` не найдены, поэтому MicroPython/ESP32 результаты оставлены как воспроизводимый сценарий запуска.
+Фактически выполнены все три набора: CPython 3.12.3, MicroPython Unix port v1.28.0
+и плата ESP8266EX 4MB с MicroPython v1.28.0 (`ESP8266_GENERIC`) на `/dev/ttyUSB0`.
 
 ## Теория
 
@@ -109,11 +110,17 @@ MicroPython использует mark-and-sweep GC для Python heap. Сбор�
 
 Для MicroPython используется `gc.collect()`, затем `gc.mem_free()`/`gc.mem_alloc()`. В этом режиме `memory_delta = free_before - free_after`, то есть приблизительная цена живого объекта в Python heap.
 
+JSON пишется потоково: скрипты не накапливают весь список результатов в памяти, а
+сразу сериализуют строки массива. Это важно для ESP8266, где даже список из всех
+измерений может сам вызвать `MemoryError`. В telemetry-бенчмарке входные строки
+также подаются как поток, чтобы измерять обработчик, а не заранее созданный
+буфер входных данных.
+
 Команды запуска:
 
 ```bash
-python3 bench/bench_structs.py --out=results/cpython_structs.json --target=cpython-local
-python3 bench/bench_programs.py --out=results/cpython_programs.json --target=cpython-local
+.venv/bin/python bench/bench_structs.py --out=results/cpython_structs.json --target=cpython-local
+.venv/bin/python bench/bench_programs.py --out=results/cpython_programs.json --target=cpython-local
 ```
 
 Для Unix-порта MicroPython:
@@ -121,14 +128,18 @@ python3 bench/bench_programs.py --out=results/cpython_programs.json --target=cpy
 ```bash
 micropython -X heapsize=64K bench/bench_structs.py --target=micropython-unix --heap-size=64K > results/micropython_unix_64k_structs.json
 micropython -X heapsize=256K bench/bench_structs.py --target=micropython-unix --heap-size=256K > results/micropython_unix_256k_structs.json
+micropython -X heapsize=256K bench/bench_programs.py --target=micropython-unix --heap-size=256K > results/micropython_unix_256k_programs.json
 micropython -X heapsize=1M bench/bench_programs.py --target=micropython-unix --heap-size=1M > results/micropython_unix_1m_programs.json
 ```
 
-Для ESP32:
+Для ESP8266:
 
 ```bash
-mpremote connect auto mount . exec "import bench.bench_structs as b; b.main(['bench/bench_structs.py', '--target=esp32'])" > results/esp32_structs.json
-mpremote connect auto mount . exec "import bench.bench_programs as b; b.main(['bench/bench_programs.py', '--target=esp32'])" > results/esp32_programs.json
+mpremote connect /dev/ttyUSB0 mount . exec "import bench.bench_structs as b; b.main(['bench/bench_structs.py', '--target=esp8266'])" > /tmp/esp8266_structs_raw.txt
+sed -n '1p' /tmp/esp8266_structs_raw.txt > results/esp8266_structs.json
+
+mpremote connect /dev/ttyUSB0 mount . exec "import bench.bench_programs as b; b.main(['bench/bench_programs.py', '--target=esp8266'])" > /tmp/esp8266_programs_raw.txt
+sed -n '1p' /tmp/esp8266_programs_raw.txt > results/esp8266_programs.json
 ```
 
 ## CPython baseline
@@ -139,16 +150,16 @@ mpremote connect auto mount . exec "import bench.bench_programs as b; b.main(['b
 
 | Тип | `shallow_size`, bytes | `peak_memory`, bytes | `time_us` |
 | --- | ---: | ---: | ---: |
-| `list` | 8856 | 33568 | 53 |
-| `tuple` | 8232 | 33024 | 70 |
-| `int` | 164 | 460 | 5 |
-| `str` | 1065 | 1225 | 3 |
-| `dict` | 36952 | 69616 | 181 |
-| `set` | 32984 | 57776 | 84 |
-| `frozenset` | 32984 | 57776 | 50 |
+| `list` | 8856 | 33568 | 69 |
+| `tuple` | 8232 | 33024 | 52 |
+| `int` | 164 | 460 | 2 |
+| `str` | 1065 | 1225 | 2 |
+| `dict` | 36952 | 69616 | 116 |
+| `set` | 32984 | 57776 | 34 |
+| `frozenset` | 32984 | 57776 | 32 |
 | `array.array('h')` | 2140 | 2476 | 140 |
 | `range` | 48 | 240 | 2 |
-| `collections.deque` | 9208 | 34056 | 58 |
+| `collections.deque` | 9208 | 34056 | 21 |
 
 Главные наблюдения:
 
@@ -187,14 +198,106 @@ timestamp,temp,humidity,status
 
 | Программа | N входов | Live/traced bytes | Peak bytes | Time, us | Примечание |
 | --- | ---: | ---: | ---: | ---: | --- |
-| naive | 64 | 14736 | 22425 | 1527 | хранит все 64 записи |
-| optimized | 64 | 624 | 2304 | 1871 | хранит 64 записи в preallocated arrays |
-| naive | 256 | 17680 | 87685 | 3978 | peak растёт из-за временных объектов |
-| optimized | 256 | 624 | 2296 | 21818 | хранит окно 128, 128 overwrites |
-| naive | 1024 | 17708 | 370857 | 24714 | peak резко растёт |
-| optimized | 1024 | 656 | 2288 | 117816 | память стабильна, 896 overwrites |
+| naive | 64 | 20247 | 22555 | 1351 | хранит все 64 записи |
+| optimized | 64 | 1752 | 2304 | 3081 | хранит 64 записи в preallocated arrays |
+| naive | 256 | 78283 | 87816 | 6582 | footprint растёт вместе с числом записей |
+| optimized | 256 | 1744 | 2296 | 22498 | хранит окно 128, 128 overwrites |
+| naive | 1024 | 332251 | 371021 | 31186 | footprint и peak резко растут |
+| optimized | 1024 | 1768 | 2288 | 108806 | память стабильна, 896 overwrites |
 
-На CPython оптимизированная версия медленнее, потому что ручной Python-парсер проигрывает C-реализациям `split()` и `float()`. Но цель этой версии - не ускорить CPython, а убрать рост памяти и временные аллокации. Для MicroPython это обычно важнее: программа, которая чуть медленнее, но не падает с `MemoryError`, лучше подходит для ESP32.
+На CPython оптимизированная версия медленнее, потому что ручной Python-парсер проигрывает C-реализациям `split()` и `float()`. Но цель этой версии - не ускорить CPython, а убрать рост памяти и временные аллокации. Для MicroPython это обычно важнее: программа, которая чуть медленнее, но не падает с `MemoryError`, лучше подходит для микроконтроллера.
+
+## Результаты MicroPython Unix
+
+Unix-port v1.28.0 был собран из исходников MicroPython и запущен с ограничением
+heap. Это удобная промежуточная проверка: поведение ближе к MicroPython, но
+без аппаратных ограничений serial-запуска.
+
+### Структуры, heap 64K, n = 1024
+
+| Тип | `memory_delta`, bytes | `time_us` | Статус |
+| --- | ---: | ---: | --- |
+| `list` | 8224 | 86 | ok |
+| `tuple` | 8224 | 77 | ok |
+| `int` | 192 | 2 | ok |
+| `str` | 1088 | 18 | ok |
+| `dict` | MemoryError | - | memory_error |
+| `set` | MemoryError | - | memory_error |
+| `frozenset` | MemoryError | - | memory_error |
+| `array.array('h')` | 2080 | 84 | ok |
+| `range` | 32 | 0 | ok |
+| `collections.deque` | 8288 | 47 | ok |
+
+При 64K heap крупные hash-table структуры не помещаются уже на `n = 1024`.
+`range` остаётся практически постоянным, а `array.array('h')` занимает примерно
+в четыре раза меньше памяти, чем `list`/`tuple` с тем же количеством small int.
+
+### Программа, heap 256K
+
+| Программа | N входов | `memory_delta`, bytes | Time, us | Статус | Примечание |
+| --- | ---: | ---: | ---: | --- | --- |
+| naive | 64 | 16384 | 1316 | ok | count=64 |
+| optimized | 64 | 992 | 864 | ok | count=64, overwrites=0 |
+| naive | 256 | MemoryError | - | memory_error | - |
+| optimized | 256 | 992 | 9307 | ok | count=128, overwrites=128 |
+| naive | 1024 | MemoryError | - | memory_error | - |
+| optimized | 1024 | 992 | 26790 | ok | count=128, overwrites=896 |
+
+### Программа, heap 1M
+
+| Программа | N входов | `memory_delta`, bytes | Time, us | Статус | Примечание |
+| --- | ---: | ---: | ---: | --- | --- |
+| naive | 64 | 16384 | 1568 | ok | count=64 |
+| optimized | 64 | 992 | 1639 | ok | count=64, overwrites=0 |
+| naive | 256 | 64544 | 12871 | ok | count=256 |
+| optimized | 256 | 992 | 8108 | ok | count=128, overwrites=128 |
+| naive | 1024 | MemoryError | - | memory_error | - |
+| optimized | 1024 | 992 | 43152 | ok | count=128, overwrites=896 |
+
+Даже при 1M heap наивная версия не проходит 1024 строки, потому что хранит все
+записи, float-значения, словари и строковый лог. Оптимизированная версия
+сохраняет постоянный footprint и ограничивает историю последними 128 измерениями.
+
+## Результаты ESP8266
+
+Плата: ESP8266EX, 4MB flash, MicroPython v1.28.0 (`ESP8266_GENERIC`), порт
+`/dev/ttyUSB0`. После загрузки было доступно около 36K heap; во время запуска
+через `mpremote mount` свободный heap перед отдельными измерениями был около
+22-26K.
+
+### Структуры, n = 1024
+
+| Тип | `memory_delta`, bytes | `time_us` | Статус |
+| --- | ---: | ---: | --- |
+| `list` | 4112 | 13965 | ok |
+| `tuple` | MemoryError | - | memory_error |
+| `int` | 160 | 283 | ok |
+| `str` | 1056 | 1376 | ok |
+| `dict` | MemoryError | - | memory_error |
+| `set` | MemoryError | - | memory_error |
+| `frozenset` | MemoryError | - | memory_error |
+| `array.array('h')` | 2064 | 5010 | ok |
+| `range` | 16 | 280 | ok |
+| `collections.deque` | 4144 | 4969 | ok |
+
+ESP8266 сильнее подчёркивает разницу между структурами: `array.array('h')`
+помещается для 1024 элементов, `range` практически бесплатен, а крупные
+`dict`/`set`/`frozenset` падают с `MemoryError`.
+
+### Программа
+
+| Программа | N входов | `memory_delta`, bytes | Time, us | Статус | Примечание |
+| --- | ---: | ---: | ---: | --- | --- |
+| naive | 64 | 6704 | 239480 | ok | count=64 |
+| optimized | 64 | 768 | 189644 | ok | count=64, overwrites=0 |
+| naive | 256 | MemoryError | - | memory_error | - |
+| optimized | 256 | 768 | 1118375 | ok | count=128, overwrites=128 |
+| naive | 1024 | MemoryError | - | memory_error | - |
+| optimized | 1024 | 768 | 5317740 | ok | count=128, overwrites=896 |
+
+На реальной плате optimized-версия даёт тот результат, ради которого она была
+написана: рост числа входных строк влияет на время, но почти не влияет на
+память. Наивная версия уже на 256 строках не помещается в heap ESP8266.
 
 ## Сценарии для проверки на MicroPython
 
@@ -204,7 +307,7 @@ timestamp,temp,humidity,status
 micropython -X heapsize=64K bench/bench_structs.py --target=micropython-unix --heap-size=64K
 ```
 
-Ожидаемый результат: крупные `dict`, `set`, `list` могут получить `memory_error`, а `range` и small `array.array` должны переживать ограничение лучше.
+Полученный результат: крупные `dict`, `set` и `frozenset` на `n = 1024` получают `memory_error`, а `range` и `array.array` переживают ограничение лучше.
 
 2. Фрагментация и временные объекты:
 
@@ -212,15 +315,17 @@ micropython -X heapsize=64K bench/bench_structs.py --target=micropython-unix --h
 micropython -X heapsize=256K bench/bench_programs.py --target=micropython-unix --heap-size=256K
 ```
 
-Ожидаемый результат: naive-версия создаёт больше временных объектов и должна иметь больший `memory_delta` или раньше падать на малом heap.
+Полученный результат: naive-версия имеет больший `memory_delta` и падает на 256/1024 строках при 256K heap, optimized-версия проходит все размеры с почти постоянной памятью.
 
-3. ESP32:
+3. ESP8266:
 
 ```bash
-mpremote connect auto mount . exec "import bench.bench_programs as b; b.main(['bench/bench_programs.py', '--quick', '--target=esp32'])"
+mpremote connect /dev/ttyUSB0 mount . exec "import bench.bench_programs as b; b.main(['bench/bench_programs.py', '--target=esp8266'])"
 ```
 
-Если полный запуск не помещается, начинать с `--quick`, затем увеличивать `--counts=64,256,1024`.
+Полученный результат: полный запуск помещается для бенчмарка целиком, но отдельные
+cases возвращают `memory_error`: naive-программа падает на 256 и 1024 строках,
+optimized-программа проходит все размеры.
 
 ## Выводы
 
@@ -242,5 +347,7 @@ MicroPython экономит память не одной техникой, а �
 - MicroPython constrained devices: https://docs.micropython.org/en/latest/reference/constrained.html
 - MicroPython speed guide: https://docs.micropython.org/en/latest/reference/speed_python.html
 - MicroPython Unix quick reference: https://docs.micropython.org/en/latest/unix/quickref.html
+- MicroPython ESP8266 tutorial: https://docs.micropython.org/en/latest/esp8266/tutorial/intro.html
+- MicroPython `mpremote`: https://docs.micropython.org/en/latest/reference/mpremote.html
 - CPython `gc`: https://docs.python.org/3.14/library/gc.html
 - MicroPython source: https://github.com/micropython/micropython

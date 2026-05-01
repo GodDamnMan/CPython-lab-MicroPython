@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import gc
 import sys
 import time
@@ -232,22 +230,38 @@ def measure_case(type_name, n, options):
     return row
 
 
-def write_json(rows, path):
+def write_json_rows(rows, path):
+    close_handle = False
     if path:
-        with open(path, "w") as handle:
-            json.dump(rows, handle)
-            handle.write("\n")
+        handle = open(path, "w")
+        close_handle = True
     else:
-        print(json.dumps(rows))
+        handle = sys.stdout
+
+    try:
+        handle.write("[")
+        first = True
+        for row in rows:
+            if first:
+                first = False
+            else:
+                handle.write(",")
+            json.dump(row, handle)
+        handle.write("]\n")
+    finally:
+        if close_handle:
+            handle.close()
 
 
 def main(argv):
     options = parse_args(argv)
-    rows = []
-    for type_name in options["types"]:
-        for n in options["sizes"]:
-            rows.append(measure_case(type_name, n, options))
-    write_json(rows, options["out"])
+
+    def rows():
+        for type_name in options["types"]:
+            for n in options["sizes"]:
+                yield measure_case(type_name, n, options)
+
+    write_json_rows(rows(), options["out"])
 
 
 if __name__ == "__main__":
