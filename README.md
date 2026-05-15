@@ -9,6 +9,8 @@
 - `bench/bench_programs.py` - сравнение наивной и оптимизированной telemetry-программы.
 - `apps/telemetry_naive.py` - версия с `list`, `dict`, `float` и временными объектами.
 - `apps/telemetry_optimized.py` - версия с fixed-point `int`, `array.array` и кольцевым буфером.
+- `apps/telemetry_c_baseline.c` - минимальный C-бейзлайн со статическими массивами.
+- `presentation/` - слайды и текст выступления.
 - `results/` - JSON-результаты запусков.
 
 ## CPython
@@ -16,6 +18,13 @@
 ```bash
 .venv/bin/python bench/bench_structs.py --out=results/cpython_structs.json --target=cpython-local
 .venv/bin/python bench/bench_programs.py --out=results/cpython_programs.json --target=cpython-local
+```
+
+## C baseline
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -pedantic apps/telemetry_c_baseline.c -o /tmp/telemetry_c_baseline
+/tmp/telemetry_c_baseline
 ```
 
 ## MicroPython Unix
